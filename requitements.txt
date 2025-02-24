@@ -1,0 +1,8 @@
+fastapi.middleware.cors 
+sklearn.model_selection
+pandas
+numpy
+typing 
+jellyfish
+collections 
+fastapi
