@@ -97,7 +97,8 @@ async def create_version(version: VersionCreate, dataset_name: str):
             datasets[dataset_name] = []
 
         # Generate version tag
-        version_tag = f'v_{len(datasets[dataset_name]) + 1}'
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        version_tag = f'v_{timestamp}'
 
         # Add file to DVC
         subprocess.run(['dvc', 'add', version.file], check=True)
@@ -110,6 +111,7 @@ async def create_version(version: VersionCreate, dataset_name: str):
 
         if status_output:
             subprocess.run(['git', 'commit', '-m', version.message], check=True)
+            subprocess.run(['git', 'tag', version_tag], check=True)  # Add Git tag
         else:
             print("No changes to commit.")
 
@@ -139,18 +141,25 @@ async def checkout_version(version: VersionCheckout):
     """Checkout a specific version of the data"""
     try:
         ensure_git_and_dvc()
-        
-        # Checkout Git tag
-        subprocess.run(['git', 'checkout', version.version], check=True)
-        
-        # Pull data from DVC
+
+        # Get a list of existing Git tags
+        git_tags = subprocess.run(['git', 'tag'], capture_output=True, text=True).stdout.splitlines()
+
+        if version.version not in git_tags:
+            raise HTTPException(status_code=404, detail=f"Version {version.version} not found. Available versions: {git_tags}")
+
+        # Reset and checkout to avoid conflicts
+        subprocess.run(['git', 'reset', '--hard'], check=True)
+        subprocess.run(['git', 'checkout', '-f', version.version], check=True)
+
+        # Pull the corresponding data from DVC
         try:
             subprocess.run(['dvc', 'pull'], check=True)
         except subprocess.CalledProcessError:
-            # If pull fails, it might be because we don't have remote storage configured
-            pass
-            
+            print("DVC pull failed, possibly due to no remote storage.")
+
         return {"message": f"Successfully checked out version {version.version}"}
+    
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=f"Error checking out version: {str(e)}")
 
