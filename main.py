@@ -91,24 +91,27 @@ async def create_version(version: VersionCreate, dataset_name: str):
     """Create a new version under a given dataset name"""
     try:
         ensure_git_and_dvc()
-
-        # Load datasets
         datasets = load_datasets()
 
-        # Ensure dataset entry exists
         if dataset_name not in datasets:
             datasets[dataset_name] = []
 
         # Generate version tag
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         version_tag = f'v_{len(datasets[dataset_name]) + 1}'
 
         # Add file to DVC
         subprocess.run(['dvc', 'add', version.file], check=True)
 
-        # Add and commit DVC file
-        subprocess.run(['git', 'add', f'{version.file}.dvc'], check=True)
-        subprocess.run(['git', 'commit', '-m', version.message], check=True)
+        # Stage all files in Git
+        subprocess.run(['git', 'add', '-A'], check=True)
+
+        # Check if there are changes before committing
+        status_output = subprocess.run(['git', 'status', '--porcelain'], capture_output=True, text=True).stdout.strip()
+
+        if status_output:
+            subprocess.run(['git', 'commit', '-m', version.message], check=True)
+        else:
+            print("No changes to commit.")
 
         # Store dataset name and version
         datasets[dataset_name].append(version_tag)
