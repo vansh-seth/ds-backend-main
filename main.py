@@ -158,9 +158,11 @@ async def checkout_model_version(version: VersionCheckout):
     try:
         ensure_git_and_dvc()
 
-        # Load models.json before checkout
+        # Load models.json and datasets.json before checkout
         models_before = load_models()
+        datasets_before = load_datasets()  # Load datasets.json
         print("Models before checkout:", models_before)
+        print("Datasets before checkout:", datasets_before)
 
         # Get a list of existing Git tags
         git_tags = subprocess.run(['git', 'tag'], capture_output=True, text=True).stdout.splitlines()
@@ -178,15 +180,17 @@ async def checkout_model_version(version: VersionCheckout):
         except subprocess.CalledProcessError:
             print("DVC pull failed, possibly due to no remote storage.")
 
-        # Restore models.json after checkout
+        # Restore models.json and datasets.json after checkout
         save_models(models_before)
+        save_datasets(datasets_before)  # Restore datasets.json
         print("Models after checkout:", load_models())
+        print("Datasets after checkout:", load_datasets())
 
         return {"message": f"Successfully checked out version {version.version}"}
     
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=f"Error checking out version: {str(e)}")
-
+    
 @app.post("/model/delete/")
 async def delete_model_version(version: VersionCheckout):
     """Delete a specific version of a model."""
@@ -321,7 +325,7 @@ async def checkout_version(version: VersionCheckout):
     
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=f"Error checking out version: {str(e)}")
-    
+
 @app.get("/dvc/status/")
 async def get_dvc_status():
     """Get current DVC status"""
@@ -329,6 +333,38 @@ async def get_dvc_status():
         ensure_git_and_dvc()
         result = subprocess.run(['dvc', 'status'], capture_output=True, text=True, check=True)
         return {"status": result.stdout.strip()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/dvc/delete/")
+async def delete_version(version: VersionCheckout):
+    try:
+        ensure_git_and_dvc()
+
+        # Load datasets.json
+        datasets = load_datasets()
+
+        # Find and remove the version from datasets.json
+        version_found = False
+        for dataset_name, version_list in datasets.items():
+            if version.version in version_list:
+                version_list.remove(version.version)
+                version_found = True
+                break
+
+        if not version_found:
+            raise HTTPException(status_code=404, detail=f"Version {version.version} not found in datasets.json")
+
+        # Save the updated datasets.json
+        save_datasets(datasets)
+
+        # Delete the Git tag
+        subprocess.run(['git', 'tag', '-d', version.version], check=True)
+
+        return {"message": f"Version {version.version} deleted successfully"}
+    
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting version: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
