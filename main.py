@@ -16,6 +16,8 @@ import git
 import json
 
 DATASET_FILE = "datasets.json"
+MODEL_FILE = "models.json"
+
 
 app = FastAPI()
 
@@ -27,6 +29,18 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
     allow_headers=["*"],  # Allows all headers
 )
+
+def load_models():
+    """Load model names and versions from file."""
+    if os.path.exists(MODEL_FILE):
+        with open(MODEL_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_models(data):
+    """Save model names and versions to file."""
+    with open(MODEL_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
 def load_datasets():
     """Load dataset names and versions from file."""
@@ -67,6 +81,144 @@ def ensure_git_and_dvc():
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=f"Error initializing repository: {str(e)}")
 
+@app.post("/model/commit/")
+async def create_model_version(
+    file: UploadFile = File(...),
+    model_name: str = Form(...),
+    message: str = Form(...),
+):
+    try:
+        ensure_git_and_dvc()
+        models = load_models()
+
+        if model_name not in models:
+            models[model_name] = []
+
+        # Save the uploaded file
+        file_path = f"models/{file.filename}"
+        os.makedirs("models", exist_ok=True)
+        with open(file_path, "wb") as f:
+            f.write(file.file.read())
+
+        # Check if the file is tracked by Git
+        git_tracked = subprocess.run(
+            ['git', 'ls-files', '--error-unmatch', file_path],
+            capture_output=True,
+            text=True,
+        ).returncode == 0
+
+        if git_tracked:
+            # Stop Git from tracking the file
+            subprocess.run(['git', 'rm', '--cached', file_path], check=True)
+            subprocess.run(['git', 'commit', '-m', f"stop tracking {file_path}"], check=True)
+
+        # Add file to DVC
+        subprocess.run(['dvc', 'add', file_path], check=True)
+
+        # Generate version tag
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        version_tag = f'model_v_{timestamp}'
+
+        # Stage all files in Git
+        subprocess.run(['git', 'add', '-A'], check=True)
+
+        # Check if there are changes before committing
+        status_output = subprocess.run(['git', 'status', '--porcelain'], capture_output=True, text=True).stdout.strip()
+
+        if status_output:
+            subprocess.run(['git', 'commit', '-m', message], check=True)
+            subprocess.run(['git', 'tag', version_tag], check=True)  # Add Git tag
+        else:
+            print("No changes to commit.")
+
+        # Store model name and version
+        models[model_name].append(version_tag)
+        save_models(models)
+
+        return {"message": "Model version created successfully", "model": model_name, "version": version_tag}
+    
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"Error in version control: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+       
+@app.get("/model/versions/")
+async def get_model_versions():
+    """Get all models and their version history"""
+    try:
+        ensure_git_and_dvc()
+        models = load_models()
+        return {"models": models}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/model/checkout/")
+async def checkout_model_version(version: VersionCheckout):
+    """Checkout a specific version of the model"""
+    try:
+        ensure_git_and_dvc()
+
+        # Load models.json before checkout
+        models_before = load_models()
+        print("Models before checkout:", models_before)
+
+        # Get a list of existing Git tags
+        git_tags = subprocess.run(['git', 'tag'], capture_output=True, text=True).stdout.splitlines()
+
+        if version.version not in git_tags:
+            raise HTTPException(status_code=404, detail=f"Version {version.version} not found. Available versions: {git_tags}")
+
+        # Reset and checkout to avoid conflicts
+        subprocess.run(['git', 'reset', '--hard'], check=True)
+        subprocess.run(['git', 'checkout', '-f', version.version], check=True)
+
+        # Pull the corresponding data from DVC
+        try:
+            subprocess.run(['dvc', 'pull'], check=True)
+        except subprocess.CalledProcessError:
+            print("DVC pull failed, possibly due to no remote storage.")
+
+        # Restore models.json after checkout
+        save_models(models_before)
+        print("Models after checkout:", load_models())
+
+        return {"message": f"Successfully checked out version {version.version}"}
+    
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"Error checking out version: {str(e)}")
+
+@app.post("/model/delete/")
+async def delete_model_version(version: VersionCheckout):
+    """Delete a specific version of a model."""
+    try:
+        ensure_git_and_dvc()
+
+        # Load models.json
+        models = load_models()
+
+        # Find and remove the version from models.json
+        version_found = False
+        for model_name, version_list in models.items():
+            if version.version in version_list:
+                version_list.remove(version.version)
+                version_found = True
+                break
+
+        if not version_found:
+            raise HTTPException(status_code=404, detail=f"Version {version.version} not found in models.json")
+
+        # Save the updated models.json
+        save_models(models)
+
+        # Delete the Git tag
+        subprocess.run(['git', 'tag', '-d', version.version], check=True)
+
+        return {"message": f"Version {version.version} deleted successfully"}
+    
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting version: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/dvc/file_data/")
 async def get_file_headers(file: str):
@@ -138,9 +290,12 @@ async def get_versions():
 
 @app.post("/dvc/checkout/")
 async def checkout_version(version: VersionCheckout):
-    """Checkout a specific version of the data"""
     try:
         ensure_git_and_dvc()
+
+        # Load datasets.json before checkout
+        datasets_before = load_datasets()
+        print("Datasets before checkout:", datasets_before)
 
         # Get a list of existing Git tags
         git_tags = subprocess.run(['git', 'tag'], capture_output=True, text=True).stdout.splitlines()
@@ -158,11 +313,15 @@ async def checkout_version(version: VersionCheckout):
         except subprocess.CalledProcessError:
             print("DVC pull failed, possibly due to no remote storage.")
 
+        # Restore datasets.json after checkout
+        save_datasets(datasets_before)
+        print("Datasets after checkout:", load_datasets())
+
         return {"message": f"Successfully checked out version {version.version}"}
     
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=f"Error checking out version: {str(e)}")
-
+    
 @app.get("/dvc/status/")
 async def get_dvc_status():
     """Get current DVC status"""
