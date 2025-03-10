@@ -160,7 +160,7 @@ async def checkout_model_version(version: VersionCheckout):
 
         # Load models.json and datasets.json before checkout
         models_before = load_models()
-        datasets_before = load_datasets()  # Load datasets.json
+        datasets_before = load_datasets()
         print("Models before checkout:", models_before)
         print("Datasets before checkout:", datasets_before)
 
@@ -170,27 +170,38 @@ async def checkout_model_version(version: VersionCheckout):
         if version.version not in git_tags:
             raise HTTPException(status_code=404, detail=f"Version {version.version} not found. Available versions: {git_tags}")
 
-        # Reset and checkout to avoid conflicts
-        subprocess.run(['git', 'reset', '--hard'], check=True)
-        subprocess.run(['git', 'checkout', '-f', version.version], check=True)
+        # Find which model this version belongs to
+        found_model = None
+        for model_name, versions in models_before.items():
+            if version.version in versions:
+                found_model = model_name
+                break
 
-        # Pull the corresponding data from DVC
+        if not found_model:
+            raise HTTPException(status_code=404, detail=f"Version {version.version} not found in any model")
+
+        # Get the commit hash for this tag
+        commit_hash = subprocess.run(
+            ['git', 'rev-list', '-n', '1', version.version], 
+            capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        # Checkout only the model-related DVC files instead of resetting the entire repo
+        subprocess.run(['git', 'checkout', f'{version.version}', '--', '*.dvc'], check=True)
+
+        # Now pull from DVC to get the actual model files
         try:
-            subprocess.run(['dvc', 'pull'], check=True)
+            subprocess.run(['dvc', 'checkout'], check=True)
         except subprocess.CalledProcessError:
-            print("DVC pull failed, possibly due to no remote storage.")
+            print("DVC checkout failed, possibly due to no remote storage.")
 
-        # Restore models.json and datasets.json after checkout
-        save_models(models_before)
-        save_datasets(datasets_before)  # Restore datasets.json
-        print("Models after checkout:", load_models())
-        print("Datasets after checkout:", load_datasets())
+        # Do NOT restore models.json or datasets.json, to keep track of active versions
 
         return {"message": f"Successfully checked out version {version.version}"}
-    
+
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=f"Error checking out version: {str(e)}")
-    
+
 @app.post("/model/delete/")
 async def delete_model_version(version: VersionCheckout):
     """Delete a specific version of a model."""
@@ -299,33 +310,54 @@ async def checkout_version(version: VersionCheckout):
 
         # Load datasets.json before checkout
         datasets_before = load_datasets()
-        print("Datasets before checkout:", datasets_before)
-
+        
         # Get a list of existing Git tags
         git_tags = subprocess.run(['git', 'tag'], capture_output=True, text=True).stdout.splitlines()
 
         if version.version not in git_tags:
             raise HTTPException(status_code=404, detail=f"Version {version.version} not found. Available versions: {git_tags}")
 
-        # Reset and checkout to avoid conflicts
-        subprocess.run(['git', 'reset', '--hard'], check=True)
-        subprocess.run(['git', 'checkout', '-f', version.version], check=True)
+        # Find which dataset this version belongs to
+        found_dataset = None
+        for dataset_name, versions in datasets_before.items():
+            if version.version in versions:
+                found_dataset = dataset_name
+                break
+                
+        if not found_dataset:
+            raise HTTPException(status_code=404, detail=f"Version {version.version} not found in any dataset")
 
-        # Pull the corresponding data from DVC
+        # Get the commit hash for this tag
+        commit_hash = subprocess.run(
+            ['git', 'rev-list', '-n', '1', version.version], 
+            capture_output=True, text=True, check=True
+        ).stdout.strip()
+        
+        # Get the list of tracked files in DVC at this commit
+        dvc_files_output = subprocess.run(
+            ['git', 'show', f'{commit_hash}:.dvc/cache'], 
+            capture_output=True, text=True
+        )
+        
+        # Instead of checking out the entire repo, just checkout the data file
+        # This assumes your data file is named "cleaned_data.csv" or similar
+        # Adjust this as needed for your specific file naming convention
+        subprocess.run(['git', 'checkout', f'{version.version}', '--', '*.dvc'], check=True)
+        
+        # Now pull from DVC to get the actual data file
         try:
-            subprocess.run(['dvc', 'pull'], check=True)
+            subprocess.run(['dvc', 'checkout'], check=True)
         except subprocess.CalledProcessError:
-            print("DVC pull failed, possibly due to no remote storage.")
+            print("DVC checkout failed, possibly due to no remote storage.")
 
-        # Restore datasets.json after checkout
-        save_datasets(datasets_before)
-        print("Datasets after checkout:", load_datasets())
-
+        # Do NOT restore datasets.json - we want to keep track of which version is active
+        # But we need to update the current version in the UI
+        
         return {"message": f"Successfully checked out version {version.version}"}
     
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=f"Error checking out version: {str(e)}")
-
+    
 @app.get("/dvc/status/")
 async def get_dvc_status():
     """Get current DVC status"""
